@@ -41,13 +41,14 @@ type Configuration struct {
 	TraceRequests   bool   `json:"-"`
 	SSHTunnelParams string
 	SaveQuery       bool `json:"-"`
+	KibanaUrl       string
 }
 
 var confDir = ".elktail"
 var defaultConfFile = "default.json"
 
 // When changing this array, make sure to also make appropriate changes in CopyConfigRelevantSettingsTo
-var configRelevantFlags = []string{"url", "f", "i", "t", "u", "ssh"}
+var configRelevantFlags = []string{"url", "f", "i", "t", "u", "ssh", "kibana"}
 
 func userHomeDir() string {
 	if runtime.GOOS == "windows" {
@@ -80,6 +81,7 @@ func (c *Configuration) CopyConfigRelevantSettingsTo(dest *Configuration) {
 	copy(dest.QueryDefinition.Terms, c.QueryDefinition.Terms)
 	dest.User = c.User
 	dest.SSHTunnelParams = c.SSHTunnelParams
+	dest.KibanaUrl = c.KibanaUrl
 }
 
 func (c *Configuration) CopyNonConfigRelevantSettingsTo(dest *Configuration) {
@@ -207,6 +209,12 @@ func (config *Configuration) Flags() []cli.Flag {
 			Value:       "",
 			Usage:       "(*) Use ssh tunnel to connect. Format for the argument is [localport:][user@]sshhost.tld[:sshport]",
 			Destination: &config.SSHTunnelParams,
+		},
+		cli.StringFlag{
+			Name:        "kibana",
+			Value:       "",
+			Usage:       "(*) Use Kibana URL as a proxy for Elasticsearch (eg. https://kibana:5601)",
+			Destination: &config.KibanaUrl,
 		},
 		cli.BoolFlag{
 			Name:        "v1",

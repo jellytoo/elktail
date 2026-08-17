@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"net/url"
 	"os"
 	"regexp"
@@ -80,6 +81,11 @@ func NewTail(configuration *Configuration) *Tail {
 	if configuration.User != "" {
 		defaultOptions = append(defaultOptions,
 			elastic.SetBasicAuth(configuration.User, configuration.Password))
+	}
+	
+	if configuration.KibanaUrl != "" {
+		defaultOptions = append(defaultOptions,
+			elastic.SetHttpClient(&http.Client{Transport: NewKibanaProxyTransport(configuration.KibanaUrl)}))
 	}
 
 	if configuration.TraceRequests {
