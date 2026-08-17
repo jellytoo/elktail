@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"crypto/tls"
 	"io"
 	"net/http"
@@ -53,6 +54,9 @@ func (t *KibanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, err
 }
 
 func NewKibanaProxyTransport(kibanaURL string) *KibanaProxyTransport {
+	if !strings.HasPrefix(kibanaURL, "http") {
+		kibanaURL = "https://" + kibanaURL
+	}
 	return &KibanaProxyTransport{
 		Base: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
