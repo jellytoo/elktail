@@ -170,6 +170,13 @@ func findIndicesForTimeRange(client *elastic.Client, indices []string, indexPatt
 	Trace.Printf("findIndicesForTimeRange: pattern=%s start=%s end=%s candidates=%d", indexPattern, start.Format(dateFormatFull), end.Format(dateFormatFull), len(indices))
 	Info.Printf("findIndicesForTimeRange: pattern=%s start=%s end=%s candidates=%d", indexPattern, start.Format(dateFormatFull), end.Format(dateFormatFull), len(indices))
 
+	matched := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		if ok, _ := regexp.MatchString(indexPattern, idx); ok {
+			matched = append(matched, idx)
+		}
+	}
+
 	type result struct {
 		index string
 		minTs time.Time
@@ -178,12 +185,12 @@ func findIndicesForTimeRange(client *elastic.Client, indices []string, indexPatt
 	}
 
 	numWorkers := 4
-	if len(indices) < numWorkers {
-		numWorkers = len(indices)
+	if len(matched) < numWorkers {
+		numWorkers = len(matched)
 	}
 
-	indexChan := make(chan string, len(indices))
-	resultChan := make(chan result, len(indices))
+	indexChan := make(chan string)
+	resultChan := make(chan result, len(matched))
 
 	var wg sync.WaitGroup
 	for i := 0; i < numWorkers; i++ {
@@ -197,14 +204,21 @@ func findIndicesForTimeRange(client *elastic.Client, indices []string, indexPatt
 		}()
 	}
 
-	for _, idx := range indices {
-		matched, _ := regexp.MatchString(indexPattern, idx)
-		if !matched {
-			continue
+	stop := make(chan struct{})
+	var lastSubmitted int32 = int32(len(matched))
+
+	go func() {
+		defer close(indexChan)
+		for i, idx := range matched {
+			select {
+			case <-stop:
+				atomic.StoreInt32(&lastSubmitted, int32(i))
+				Trace.Printf("findIndicesForTimeRange: stopping submission at %s", idx)
+				return
+			case indexChan <- idx:
+			}
 		}
-		indexChan <- idx
-	}
-	close(indexChan)
+	}()
 
 	go func() {
 		wg.Wait()
@@ -212,23 +226,53 @@ func findIndicesForTimeRange(client *elastic.Client, indices []string, indexPatt
 	}()
 
 	selected := make([]string, 0)
-	for res := range resultChan {
-		if res.err != nil {
-			Trace.Printf("findIndicesForTimeRange: skipping index %s: %v", res.index, res.err)
+	results := make(map[string]result)
+
+	for i, idx := range matched {
+		for {
+			if r, ok := results[idx]; ok {
+				break
+			}
+			r, ok := <-resultChan
+			if !ok {
+				break
+			}
+			results[r.index] = r
+		}
+
+		r, ok := results[idx]
+		if !ok {
+			if i >= int(atomic.LoadInt32(&lastSubmitted)) {
+				Trace.Printf("findIndicesForTimeRange: index %s not submitted, breaking", idx)
+				break
+			}
+			Trace.Printf("findIndicesForTimeRange: no result for submitted index %s, breaking", idx)
+			break
+		}
+
+		if r.err != nil {
+			Trace.Printf("findIndicesForTimeRange: skipping index %s: %v", idx, r.err)
 			continue
 		}
 
-		// Select if index range overlaps with query range
-		if (res.maxTs.Equal(start) || res.maxTs.After(start)) && (res.minTs.Equal(end) || res.minTs.Before(end)) {
-			Trace.Printf("findIndicesForTimeRange: selecting index %s range %s to %s", res.index, res.minTs.Format(dateFormatFull), res.maxTs.Format(dateFormatFull))
-			Info.Printf("findIndicesForTimeRange: selecting index %s range %s to %s", res.index, res.minTs.Format(dateFormatFull), res.maxTs.Format(dateFormatFull))
-			selected = append(selected, res.index)
-		} else {
-			Trace.Printf("findIndicesForTimeRange: skipping index %s range %s to %s (no overlap)", res.index, res.minTs.Format(dateFormatFull), res.maxTs.Format(dateFormatFull))
+		Trace.Printf("findIndicesForTimeRange: index %s range %s to %s", idx, r.minTs.Format(dateFormatFull), r.maxTs.Format(dateFormatFull))
+
+		if r.maxTs.Before(start) {
+			Trace.Printf("findIndicesForTimeRange: index %s too old", idx)
+			continue
 		}
+
+		if r.minTs.After(end) {
+			Trace.Printf("findIndicesForTimeRange: stopping at %s, min_ts %s after end %s", idx, r.minTs.Format(dateFormatFull), end.Format(dateFormatFull))
+			close(stop)
+			break
+		}
+
+		Trace.Printf("findIndicesForTimeRange: selecting index %s", idx)
+		Info.Printf("findIndicesForTimeRange: selecting index %s range %s to %s", idx, r.minTs.Format(dateFormatFull), r.maxTs.Format(dateFormatFull))
+		selected = append(selected, idx)
 	}
 
-	sort.Strings(selected)
 	return selected
 }
 
