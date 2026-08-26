@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"sort"
+	"sync"
 
 	"github.com/olivere/elastic/v7"
 	"github.com/urfave/cli"
@@ -137,20 +139,17 @@ func (tail *Tail) selectIndices(configuration *Configuration) {
 	if configuration.QueryDefinition.IsDateTimeFiltered() {
 		startDate := configuration.QueryDefinition.AfterDateTime
 		endDate := configuration.QueryDefinition.BeforeDateTime
+
 		if startDate == "" && endDate != "" {
-			lastIndex := findLastIndex(indices, configuration.SearchTarget.IndexPattern)
-			lastIndexDate := extractYMDDate(lastIndex, ".")
-			if lastIndexDate.Before(extractYMDDate(endDate, "-")) {
-				startDate = lastIndexDate.Format(dateFormatDMY)
-			} else {
-				startDate = endDate
-			}
+			// Only 'before' is set: start from the earliest index
+			startDate = time.Unix(0, 0).Format(dateFormatFull)
 		}
 		if endDate == "" {
-			endDate = time.Now().Format(dateFormatDMY)
+			endDate = time.Now().Format(dateFormatFull)
 		}
-		tail.indices = findIndicesForDateRange(indices, configuration.SearchTarget.IndexPattern, startDate, endDate)
 
+		tail.indices = findIndicesForTimeRange(tail.client, indices, configuration.SearchTarget.IndexPattern,
+			configuration.QueryDefinition.TimestampField, startDate, endDate)
 	} else {
 		index := findLastIndex(indices, configuration.SearchTarget.IndexPattern)
 		if index == `` {
@@ -160,6 +159,103 @@ func (tail *Tail) selectIndices(configuration *Configuration) {
 		tail.indices = result[:]
 	}
 	Info.Printf("Using indices: %s", tail.indices)
+}
+
+func findIndicesForTimeRange(client *elastic.Client, indices []string, indexPattern, timestampField, startDate, endDate string) []string {
+	start := parseElasticTimeStamp(startDate)
+	end := parseElasticTimeStamp(endDate)
+
+	sort.Strings(indices)
+
+	Trace.Printf("findIndicesForTimeRange: pattern=%s start=%s end=%s candidates=%d", indexPattern, start.Format(dateFormatFull), end.Format(dateFormatFull), len(indices))
+	Info.Printf("findIndicesForTimeRange: pattern=%s start=%s end=%s candidates=%d", indexPattern, start.Format(dateFormatFull), end.Format(dateFormatFull), len(indices))
+
+	type result struct {
+		index string
+		minTs time.Time
+		maxTs time.Time
+		err   error
+	}
+
+	numWorkers := 4
+	if len(indices) < numWorkers {
+		numWorkers = len(indices)
+	}
+
+	indexChan := make(chan string, len(indices))
+	resultChan := make(chan result, len(indices))
+
+	var wg sync.WaitGroup
+	for i := 0; i < numWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range indexChan {
+				minTs, maxTs, err := indexTimeRange(client, idx, timestampField)
+				resultChan <- result{index: idx, minTs: minTs, maxTs: maxTs, err: err}
+			}
+		}()
+	}
+
+	for _, idx := range indices {
+		matched, _ := regexp.MatchString(indexPattern, idx)
+		if !matched {
+			continue
+		}
+		indexChan <- idx
+	}
+	close(indexChan)
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	selected := make([]string, 0)
+	for res := range resultChan {
+		if res.err != nil {
+			Trace.Printf("findIndicesForTimeRange: skipping index %s: %v", res.index, res.err)
+			continue
+		}
+
+		// Select if index range overlaps with query range
+		if (res.maxTs.Equal(start) || res.maxTs.After(start)) && (res.minTs.Equal(end) || res.minTs.Before(end)) {
+			Trace.Printf("findIndicesForTimeRange: selecting index %s range %s to %s", res.index, res.minTs.Format(dateFormatFull), res.maxTs.Format(dateFormatFull))
+			Info.Printf("findIndicesForTimeRange: selecting index %s range %s to %s", res.index, res.minTs.Format(dateFormatFull), res.maxTs.Format(dateFormatFull))
+			selected = append(selected, res.index)
+		} else {
+			Trace.Printf("findIndicesForTimeRange: skipping index %s range %s to %s (no overlap)", res.index, res.minTs.Format(dateFormatFull), res.maxTs.Format(dateFormatFull))
+		}
+	}
+
+	sort.Strings(selected)
+	return selected
+}
+
+func indexTimeRange(client *elastic.Client, index, timestampField string) (time.Time, time.Time, error) {
+	aggs := elastic.NewMinAggregation().Field(timestampField)
+	agg2 := elastic.NewMaxAggregation().Field(timestampField)
+
+	Trace.Printf("indexTimeRange: querying index %s for min/max %s", index, timestampField)
+
+	resp, err := client.Search().Index(index).Size(0).Aggregation("min_ts", aggs).Aggregation("max_ts", agg2).Do(context.Background())
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+
+	minAgg, found := resp.Aggregations.Min("min_ts")
+	if !found || minAgg.Value == nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("no min aggregation result")
+	}
+	maxAgg, found := resp.Aggregations.Max("max_ts")
+	if !found || maxAgg.Value == nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("no max aggregation result")
+	}
+
+	minTs := time.Unix(0, int64(*minAgg.Value)*int64(time.Millisecond))
+	maxTs := time.Unix(0, int64(*maxAgg.Value)*int64(time.Millisecond))
+
+	return minTs, maxTs, nil
 }
 
 // Start the tailer
