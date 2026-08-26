@@ -82,10 +82,17 @@ func NewTail(configuration *Configuration) *Tail {
 		defaultOptions = append(defaultOptions,
 			elastic.SetBasicAuth(configuration.User, configuration.Password))
 	}
-	
+
 	if configuration.KibanaUrl != "" {
+		httpClient := &http.Client{
+			Transport: NewKibanaProxyTransport(configuration.KibanaUrl),
+		}
 		defaultOptions = append(defaultOptions,
-			elastic.SetHttpClient(&http.Client{Transport: NewKibanaProxyTransport(configuration.KibanaUrl)}))
+			elastic.SetHttpClient(httpClient),
+			elastic.SetSniff(false),
+			elastic.SetHealthcheck(false),
+			elastic.SetMaxRetries(0),
+		)
 	}
 
 	if configuration.TraceRequests {
@@ -199,6 +206,10 @@ func (tail *Tail) initialSearch(initialEntries int) (*elastic.SearchResult, erro
 
 // Process the results (e.g. prints them out based on configured format)
 func (tail *Tail) processResults(searchResult *elastic.SearchResult) {
+	if searchResult == nil || searchResult.Hits == nil {
+		Trace.Printf("No results returned (searchResult or Hits is nil)\n")
+		return
+	}
 	Trace.Printf("Fetched page of %d results out of %d total.\n", len(searchResult.Hits.Hits), searchResult.Hits.TotalHits)
 	hits := searchResult.Hits.Hits
 
@@ -421,8 +432,12 @@ func main() {
 		}
 
 		if config.User != "" {
-			fmt.Print("Enter password: ")
-			config.Password = readPasswd()
+			if envPass := os.Getenv("ELKTAILPASSWORD"); envPass != "" {
+				config.Password = envPass
+			} else {
+				fmt.Print("Enter password: ")
+				config.Password = readPasswd()
+			}
 		}
 
 		//reset TunnelUrl to nothing, we'll point to the tunnel if we actually manage to create it

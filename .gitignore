@@ -17,3 +17,10 @@ bin/
 vendor/
 release/
 release.sh
+*field*.txt
+*.txt
+DEADJOE
+NR5103EV3_1.00 4.40.pdf
+all-settings*
+elktail
+elktail.exe

@@ -6,21 +6,48 @@ package main
 
 import (
 	"bytes"
-	"strings"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
+
+	"h12.io/socks"
 )
 
 type KibanaProxyTransport struct {
-	Base      http.RoundTripper
-	KibanaURL string
+	KibanaURL  string
+	SocksProxy string
+}
+
+func kibanaTrace(format string, v ...interface{}) {
+	Trace.Printf(format, v...)
+}
+
+func (t *KibanaProxyTransport) baseTransport() http.RoundTripper {
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+
+	if t.SocksProxy != "" {
+		dialSocksProxy := socks.Dial(t.SocksProxy)
+		tr.Dial = func(network, addr string) (net.Conn, error) {
+			return dialSocksProxy(network, addr)
+		}
+	} else {
+		tr.Proxy = http.ProxyFromEnvironment
+	}
+
+	return tr
 }
 
 func (t *KibanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	kibanaTrace("Original request: %s %s", req.Method, req.URL.String())
+
 	var body []byte
-	if req.Body != nil {
+	if req.Body != nil && req.Body != http.NoBody {
 		var err error
 		body, err = io.ReadAll(req.Body)
 		if err != nil {
@@ -42,25 +69,40 @@ func (t *KibanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, err
 	q.Set("method", req.Method)
 	proxyURL.RawQuery = q.Encode()
 
-	proxyReq, err := http.NewRequest(http.MethodPost, proxyURL.String(), bytes.NewReader(body))
+	var bodyReader io.Reader
+	if len(body) > 0 {
+		bodyReader = bytes.NewReader(body)
+	}
+	proxyReq, err := http.NewRequest(http.MethodPost, proxyURL.String(), bodyReader)
 	if err != nil {
 		return nil, err
 	}
 
-	proxyReq.Header = req.Header.Clone()
+	for name, values := range req.Header {
+		lower := strings.ToLower(name)
+		if lower == "host" || lower == "accept-encoding" || lower == "content-length" || lower == "transfer-encoding" {
+			continue
+		}
+		for _, value := range values {
+			proxyReq.Header.Add(name, value)
+		}
+	}
 	proxyReq.Header.Set("kbn-xsrf", "true")
 
-	return t.Base.RoundTrip(proxyReq)
+	kibanaTrace("Proxy request: POST %s [socks=%s]", proxyURL.String(), t.SocksProxy)
+
+	return t.baseTransport().RoundTrip(proxyReq)
 }
 
 func NewKibanaProxyTransport(kibanaURL string) *KibanaProxyTransport {
 	if !strings.HasPrefix(kibanaURL, "http") {
 		kibanaURL = "https://" + kibanaURL
 	}
+
+	socksProxy := os.Getenv("ELKTAILSOCKS")
+
 	return &KibanaProxyTransport{
-		Base: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-		KibanaURL: kibanaURL,
+		KibanaURL:  kibanaURL,
+		SocksProxy: socksProxy,
 	}
 }
