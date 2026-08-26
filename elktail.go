@@ -18,6 +18,7 @@ import (
 	"time"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/olivere/elastic/v7"
 	"github.com/urfave/cli"
@@ -168,7 +169,6 @@ func findIndicesForTimeRange(client *elastic.Client, indices []string, indexPatt
 	sort.Strings(indices)
 
 	Trace.Printf("findIndicesForTimeRange: pattern=%s start=%s end=%s candidates=%d", indexPattern, start.Format(dateFormatFull), end.Format(dateFormatFull), len(indices))
-	Info.Printf("findIndicesForTimeRange: pattern=%s start=%s end=%s candidates=%d", indexPattern, start.Format(dateFormatFull), end.Format(dateFormatFull), len(indices))
 
 	matched := make([]string, 0, len(indices))
 	for _, idx := range indices {
