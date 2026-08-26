@@ -1,14 +1,15 @@
 /*
-Copyright (C) 2016 Krešimir Nesek
-This software may be modified and distributed under the terms
-of the MIT license. See the LICENSE file for details.
-*/
+ * Copyright (C) 2016 Krešimir Nesek
+ * This software may be modified and distributed under the terms
+ * of the MIT license. See the LICENSE file for details. 
+ */
 
 package main
 
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -28,12 +29,12 @@ import (
 
 // Tail is a structure that holds data necessary to perform tailing.
 type Tail struct {
-	client          *elastic.Client  //elastic search client that we'll use to contact EL
+	client          *elastic.Client //elastic search client that we'll use to contact EL
 	queryDefinition *QueryDefinition //structure containing query definition and formatting
-	indices         []string         //indices to search through
-	lastTimeStamp   string           //timestamp of the last result
+	indices         []string //indices to search through
+	lastTimeStamp   string //timestamp of the last result
 	lastIDs         []displayedEntry //result IDs that we fetched in the last query, used to avoid duplicates when using tailing query time window
-	order           bool             //search order - true = ascending (may be reversed in case date-after filtering)
+	order           bool //search order - true = ascending (may be reversed in case date-after filtering)
 }
 
 type displayedEntry struct {
@@ -51,6 +52,7 @@ var formatRegexp = regexp.MustCompile("%[A-Za-z0-9@_.-]+")
 const dateFormatDMY = "2006-01-02"
 const dateFormatFull = "2006-01-02T15:04:05.999Z07:00"
 const tailingTimeWindow = 500
+const scrollPageSize = 1000
 
 // NewTail creates a new Tailer using configuration
 func NewTail(configuration *Configuration) *Tail {
@@ -304,6 +306,16 @@ func indexTimeRange(client *elastic.Client, index, timestampField string) (time.
 
 // Start the tailer
 func (tail *Tail) Start(follow bool, initialEntries int) {
+	if !follow {
+		// List-only mode (includes any date-filtered query): fetch ALL matching
+		// results via scroll instead of a single size-capped search.
+		err := tail.scrollSearch(tail.buildSearchQuery(), tail.order)
+		if err != nil {
+			Error.Fatalln("Error in executing search query.", err)
+		}
+		return
+	}
+
 	result, err := tail.initialSearch(initialEntries)
 	if err != nil {
 		Error.Fatalln("Error in executing search query.", err)
@@ -311,6 +323,10 @@ func (tail *Tail) Start(follow bool, initialEntries int) {
 	tail.processResults(result)
 	delay := 500 * time.Millisecond
 	for follow {
+		if tail.reachedBeforeBoundary() {
+			Info.Printf("Reached --before boundary %s, stopping tail.", tail.queryDefinition.BeforeDateTime)
+			break
+		}
 		time.Sleep(delay)
 		if tail.lastTimeStamp != "" {
 			//we can execute follow up timestamp filtered query only if we fetched at least 1 result in initial query
@@ -337,6 +353,38 @@ func (tail *Tail) Start(follow bool, initialEntries int) {
 			delay = delay + 500*time.Millisecond
 		}
 	}
+}
+
+// reachedBeforeBoundary returns true once the newest timestamp seen so far has
+// reached or passed the configured --before boundary, meaning no further
+// polling can produce new matching data.
+func (tail *Tail) reachedBeforeBoundary() bool {
+	if tail.queryDefinition.BeforeDateTime == "" || tail.lastTimeStamp == "" {
+		return false
+	}
+	return tail.lastTimeStamp >= tail.queryDefinition.BeforeDateTime
+}
+
+// scrollSearch fetches and processes ALL results matching query, paginating via
+// the Elasticsearch Scroll API so results aren't capped at any single page size.
+func (tail *Tail) scrollSearch(query elastic.Query, asc bool) error {
+	scroll := tail.client.Scroll(tail.indices...).
+		Query(query).
+		Size(scrollPageSize).
+		Sort(tail.queryDefinition.TimestampField, asc)
+	defer scroll.Clear(context.Background())
+
+	for {
+		res, err := scroll.Do(context.Background())
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		tail.processResults(res)
+	}
+	return nil
 }
 
 // Initial search needs to be run until we get at least one result
@@ -388,12 +436,10 @@ func (tail *Tail) processResults(searchResult *elastic.SearchResult) {
 			tail.lastIDs = append(tail.lastIDs, displayedEntry{timeStamp: timeStamp, id: hit.Id})
 		}
 	}
-	cutoffTime := formatElasticTimeStamp(parseElasticTimeStamp(tail.lastTimeStamp).Add(-tailingTimeWindow * time.Millisecond))
-	drainOldEntries(&tail.lastIDs, cutoffTime)
-	//fmt.Print("------------------------------------------------\n")
-	//Debugging IDs
-	//Info.Printf("CutOff time: %s", cutoffTime)
-	//Info.Printf("IDs: %v", tail.lastIDs)
+	if tail.lastTimeStamp != "" {
+		cutoffTime := formatElasticTimeStamp(parseElasticTimeStamp(tail.lastTimeStamp).Add(-tailingTimeWindow * time.Millisecond))
+		drainOldEntries(&tail.lastIDs, cutoffTime)
+	}
 }
 
 func parseElasticTimeStamp(elTimeStamp string) time.Time {
