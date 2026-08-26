@@ -76,6 +76,7 @@ func NewTail(configuration *Configuration) *Tail {
 		elastic.SetSniff(false),
 		elastic.SetHealthcheckTimeoutStartup(10 * time.Second),
 		elastic.SetHealthcheckTimeout(2 * time.Second),
+		elastic.SetHttpClient(&http.Client{Transport: elktailTransport()}),
 	}
 
 	if configuration.User != "" {
