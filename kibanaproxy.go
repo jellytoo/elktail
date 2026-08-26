@@ -6,33 +6,14 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
-
-	"h12.io/socks"
 )
 
 type KibanaProxyTransport struct {
 	KibanaURL string
-}
-
-func (t *KibanaProxyTransport) baseTransport() http.RoundTripper {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-
-	if socksProxy := os.Getenv("ELKTAILSOCKS"); socksProxy != "" {
-		dialSocksProxy := socks.Dial(socksProxy)
-		tr.Dial = func(network, addr string) (net.Conn, error) {
-			return dialSocksProxy(network, addr)
-		}
-	}
-
-	return tr
 }
 
 func (t *KibanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -79,7 +60,7 @@ func (t *KibanaProxyTransport) RoundTrip(req *http.Request) (*http.Response, err
 	}
 	proxyReq.Header.Set("kbn-xsrf", "true")
 
-	return t.baseTransport().RoundTrip(proxyReq)
+	return elktailTransport().RoundTrip(proxyReq)
 }
 
 func NewKibanaProxyTransport(kibanaURL string) *KibanaProxyTransport {

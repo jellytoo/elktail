@@ -10,11 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"crypto/tls"
 	"net/http"
 	"net/url"
 	"os"
-	"net"
 	"regexp"
 	"strings"
 	"time"
@@ -23,7 +21,6 @@ import (
 	"github.com/urfave/cli"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/net/context"
-	"h12.io/socks"
 )
 
 // Tail is a structure that holds data necessary to perform tailing.
@@ -51,20 +48,6 @@ var formatRegexp = regexp.MustCompile("%[A-Za-z0-9@_.-]+")
 const dateFormatDMY = "2006-01-02"
 const dateFormatFull = "2006-01-02T15:04:05.999Z07:00"
 const tailingTimeWindow = 500
-
-func newSocksTransport() http.RoundTripper {
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-
-	if socksProxy := os.Getenv("ELKTAILSOCKS"); socksProxy != "" {
-		dialSocksProxy := socks.Dial(socksProxy)
-		tr.Dial = func(network, addr string) (net.Conn, error) {
-			return dialSocksProxy(network, addr)
-		}
-	}
-
-	return tr
-}
 
 // NewTail creates a new Tailer using configuration
 func NewTail(configuration *Configuration) *Tail {
@@ -102,7 +85,7 @@ func NewTail(configuration *Configuration) *Tail {
 
 	if os.Getenv("ELKTAILSOCKS") != "" {
 		defaultOptions = append(defaultOptions,
-			elastic.SetHttpClient(&http.Client{Transport: newSocksTransport()}))
+			elastic.SetHttpClient(&http.Client{Transport: elktailTransport()}))
 	}
 
 	if configuration.KibanaUrl != "" {
