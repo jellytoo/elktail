@@ -230,7 +230,7 @@ func findIndicesForTimeRange(client *elastic.Client, indices []string, indexPatt
 
 	for i, idx := range matched {
 		for {
-			if r, ok := results[idx]; ok {
+			if _, ok := results[idx]; ok {
 				break
 			}
 			r, ok := <-resultChan
@@ -244,9 +244,9 @@ func findIndicesForTimeRange(client *elastic.Client, indices []string, indexPatt
 		if !ok {
 			if i >= int(atomic.LoadInt32(&lastSubmitted)) {
 				Trace.Printf("findIndicesForTimeRange: index %s not submitted, breaking", idx)
-				break
+			} else {
+				Trace.Printf("findIndicesForTimeRange: no result for submitted index %s, breaking", idx)
 			}
-			Trace.Printf("findIndicesForTimeRange: no result for submitted index %s, breaking", idx)
 			break
 		}
 
